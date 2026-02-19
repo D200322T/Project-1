@@ -19,7 +19,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-import feedparser
+import xml.etree.ElementTree as ET
+
 import requests
 
 import config
@@ -139,9 +140,65 @@ def scrape_reddit(days: int = config.HISTORY_DAYS) -> dict[str, dict[str, int]]:
 
 # ─── RSS / News scraper ────────────────────────────────────────────────────────
 
+def _parse_rss_date(date_str: str) -> datetime:
+    """Best-effort parse of an RSS pubDate / atom:updated string."""
+    from email.utils import parsedate_to_datetime
+    if not date_str:
+        return datetime.now(tz=timezone.utc)
+    try:
+        return parsedate_to_datetime(date_str)
+    except Exception:
+        pass
+    for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(date_str[:19], fmt[:len(date_str[:19])])
+            return dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return datetime.now(tz=timezone.utc)
+
+
+def _extract_rss_items(xml_text: str) -> list[dict]:
+    """Parse RSS 2.0 or Atom feed text and return a list of {title, summary, date} dicts."""
+    items = []
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return items
+
+    ns = {"atom": "http://www.w3.org/2005/Atom"}
+
+    # ── Atom feed ──
+    if "atom" in root.tag or root.tag.endswith("}feed") or root.tag == "feed":
+        for entry in root.findall(".//{http://www.w3.org/2005/Atom}entry"):
+            title_el = entry.find("{http://www.w3.org/2005/Atom}title")
+            summary_el = entry.find("{http://www.w3.org/2005/Atom}summary")
+            content_el = entry.find("{http://www.w3.org/2005/Atom}content")
+            updated_el = entry.find("{http://www.w3.org/2005/Atom}updated")
+            published_el = entry.find("{http://www.w3.org/2005/Atom}published")
+            items.append({
+                "title": title_el.text if title_el is not None else "",
+                "summary": (summary_el or content_el).text if (summary_el or content_el) is not None else "",
+                "date": (published_el or updated_el).text if (published_el or updated_el) is not None else "",
+            })
+        return items
+
+    # ── RSS 2.0 feed ──
+    for item in root.findall(".//item"):
+        title_el = item.find("title")
+        desc_el = item.find("description")
+        date_el = item.find("pubDate")
+        items.append({
+            "title": title_el.text if title_el is not None else "",
+            "summary": desc_el.text if desc_el is not None else "",
+            "date": date_el.text if date_el is not None else "",
+        })
+    return items
+
+
 def scrape_rss(days: int = config.HISTORY_DAYS) -> dict[str, dict[str, int]]:
     """
-    Scrape RSS feeds for product mentions.
+    Scrape RSS feeds for product mentions using stdlib xml.etree.ElementTree.
 
     Returns:
         { product_name: { "YYYY-MM-DD": mention_count, ... }, ... }
@@ -151,24 +208,23 @@ def scrape_rss(days: int = config.HISTORY_DAYS) -> dict[str, dict[str, int]]:
 
     counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
 
+    headers = {"User-Agent": "BeautyProductTracker/1.0 (RSS reader)"}
+
     for feed_url in config.RSS_FEEDS:
         try:
-            feed = feedparser.parse(feed_url)
-            for entry in feed.entries:
-                # Parse published date
-                published = None
-                if hasattr(entry, "published_parsed") and entry.published_parsed:
-                    published = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
-                elif hasattr(entry, "updated_parsed") and entry.updated_parsed:
-                    published = datetime(*entry.updated_parsed[:6], tzinfo=timezone.utc)
-                else:
-                    published = datetime.now(tz=timezone.utc)
+            resp = requests.get(feed_url, headers=headers, timeout=10)
+            resp.raise_for_status()
+            items = _extract_rss_items(resp.text)
 
+            for item in items:
+                published = _parse_rss_date(item["date"])
+                if published.tzinfo is None:
+                    published = published.replace(tzinfo=timezone.utc)
                 if published < cutoff_dt:
                     continue
 
                 date = published.strftime("%Y-%m-%d")
-                text = f"{entry.get('title', '')} {entry.get('summary', '')}"
+                text = f"{item['title']} {item['summary']}"
 
                 for product in config.PRODUCTS:
                     name = product["name"]
