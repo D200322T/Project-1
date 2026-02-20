@@ -118,6 +118,9 @@ def run_regression(
     if len(x) < 5:
         return None
 
+    if np.all(x == x[0]):
+        return None
+
     slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
     r_squared = r_value ** 2
 
