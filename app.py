@@ -507,14 +507,31 @@ st.markdown(
 
 summary_df = reg.summary_table(all_reg_results)
 # Filter to selected products only
-summary_df = summary_df[summary_df["Product"].isin(selected_products)]
+summary_df = summary_df[summary_df["Product"].isin(selected_products)].copy()
 
-# Use emoji indicators — no CSS required, readable in every theme
-summary_df["Significant (p<0.05)"] = summary_df["Significant (p<0.05)"].map(
-    {True: "✅ Yes", False: "❌ No"}
+# Force string conversion — .apply avoids any dtype inference issues
+summary_df["Significant (p<0.05)"] = summary_df["Significant (p<0.05)"].apply(
+    lambda x: "Yes" if x else "No"
 )
 
-st.dataframe(summary_df, use_container_width=True, hide_index=True)
+# Explicitly declare every column type so Streamlit's Arrow renderer
+# cannot auto-detect booleans and re-apply its own green checkbox styling
+st.dataframe(
+    summary_df,
+    use_container_width=True,
+    hide_index=True,
+    column_config={
+        "Product": st.column_config.TextColumn("Product"),
+        "Best Lag (days)": st.column_config.TextColumn("Best Lag (days)"),
+        "R²": st.column_config.NumberColumn("R²", format="%.4f"),
+        "Pearson r": st.column_config.NumberColumn("Pearson r", format="%.4f"),
+        "p-value": st.column_config.NumberColumn("p-value", format="%.4f"),
+        "Significant (p<0.05)": st.column_config.TextColumn("Significant (p<0.05)"),
+        "Direction": st.column_config.TextColumn("Direction"),
+        "Slope": st.column_config.NumberColumn("Slope", format="%.6f"),
+        "Observations": st.column_config.NumberColumn("Observations"),
+    },
+)
 
 
 # ─── Mention leaderboard ──────────────────────────────────────────────────────
