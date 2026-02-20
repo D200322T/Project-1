@@ -108,6 +108,145 @@ def normalize_series(s: pd.Series, method: str) -> pd.Series:
     return s
 
 
+# ─── Regression narrative helpers ─────────────────────────────────────────────
+
+REGRESSION_CONTEXT: dict[str, str] = {
+    "L'Oréal": (
+        "L'Oréal is the world's largest beauty conglomerate, with revenue spread across "
+        "mass-market (Maybelline, NYX), luxury (Lancôme, Kiehl's), and dermatology segments. "
+        "Its Paris-listed stock (OR.PA) moves primarily on earnings surprises, euro/dollar "
+        "dynamics, and macro consumer-spending sentiment rather than day-to-day social chatter. "
+        "Brand mentions spike around product launches, sustainability announcements, and M&A "
+        "speculation, but these rarely translate to same-day or next-day price action. A weak "
+        "or insignificant regression is the expected baseline here. If any lag shows "
+        "significance, consider whether a major PR event coincided with an analyst upgrade "
+        "in that window — correlation without a clear mechanism is likely coincidental."
+    ),
+    "Estée Lauder": (
+        "Estée Lauder (EL) has been one of the most volatile major beauty stocks since 2022 "
+        "due to heavy exposure to China's duty-free travel-retail channel. Mention spikes are "
+        "often driven by sub-brand launches (MAC, La Mer, Clinique) rather than corporate "
+        "news, diluting any clean signal. Crucially, when EL mentions surge on negative news "
+        "(China slowdown coverage, inventory destocking), returns tend to fall — this can flip "
+        "the correlation sign or inflate residual variance and make the regression noisy. "
+        "A near-zero or negative R² at short lags is plausible. Any positive lag-2 or lag-3 "
+        "signal might reflect beauty-press coverage flowing into short-term retail interest "
+        "before analysts react."
+    ),
+    "e.l.f. Beauty": (
+        "e.l.f. Beauty (ELF) is arguably the most socially-driven stock in this dataset — its "
+        "entire growth story was built on TikTok virality and Gen Z engagement, and its "
+        "valuation multiple reflects that narrative premium. A positive, potentially significant "
+        "lag-1 correlation would be consistent with social buzz leading consumer purchases, "
+        "which then surprise analysts and move the stock. However, the scraper captures Reddit "
+        "and news mentions; if the primary channel driving demand is TikTok (not scraped), the "
+        "signal will be muted. If significance appears at lag = 0, consider whether large "
+        "Reddit threads coincide with stock run-up days as a consequence of momentum — not "
+        "necessarily as a cause."
+    ),
+    "Revlon": (
+        "Revlon emerged from Chapter 11 bankruptcy in 2023 and its equity is extremely thinly "
+        "traded with erratic, low-liquidity price swings. A large proportion of its mentions "
+        "are driven by bankruptcy and restructuring coverage rather than genuine consumer demand "
+        "signals. Expect near-zero R² and high p-values across all lags — the noise-to-signal "
+        "ratio is very high, and any apparent correlation in a small sample is likely spurious. "
+        "A single outlier day (e.g. a restructuring announcement causing a large mention spike "
+        "and a sharp price move) can single-handedly dominate the regression slope, producing "
+        "a misleadingly 'clean' line that disappears if that observation is removed."
+    ),
+    "Maybelline": (
+        "Maybelline is a wholly-owned L'Oréal subsidiary with no independent stock listing; "
+        "mentions feed indirectly into L'Oréal's revenue line. Running this regression against "
+        "L'Oréal's ticker means the mention signal is diluted by all other L'Oréal businesses "
+        "(luxury, dermatology, professional products). Mention spikes tend to follow influencer "
+        "collaborations and hero-product moments (Sky High mascara, Fit Me franchise). Any weak "
+        "positive lag-1 effect, if present, would suggest that Maybelline buzz contributes to "
+        "L'Oréal's broader brand sentiment — but isolating that contribution is not possible "
+        "without product-level revenue data."
+    ),
+}
+
+
+def render_regression_breakdown(
+    name: str, r: "reg.RegressionResult", all_lag_results: list
+) -> None:
+    """Render a comprehensive methodology + results breakdown for one product."""
+    st.markdown("#### Regression Results Breakdown")
+
+    max_lag = max((lr.lag_days for lr in all_lag_results), default=r.lag_days)
+    best = reg.best_lag_result(all_lag_results)
+    best_lag_note = (
+        f"Across all computed lags (0–{max_lag}), the **best-performing lag is "
+        f"{best.lag_days} day(s)** (R² = {best.r_squared:.4f})."
+        if best else ""
+    )
+
+    r2_word = (
+        "negligible (<1%)" if r.r_squared < 0.01
+        else "very weak (1–5%)" if r.r_squared < 0.05
+        else "weak (5–20%)" if r.r_squared < 0.20
+        else "moderate (20–50%)"
+    )
+    pearson_word = (
+        "negligible" if abs(r.pearson_r) < 0.1
+        else "weak" if abs(r.pearson_r) < 0.3
+        else "moderate" if abs(r.pearson_r) < 0.5
+        else "strong"
+    )
+    direction_sign = "increase" if r.slope >= 0 else "decrease"
+
+    with st.expander("What do these numbers mean?", expanded=True):
+        st.markdown(f"""
+**How lag regression works**
+
+A "lag" of **{r.lag_days} trading day(s)** means we test: *"Do mention counts on day T predict \
+the stock return on day T + {r.lag_days}?"*
+
+- **Lag = 0** — same-day co-movement. Do mentions and returns rise together on the same day?
+- **Lag = 1** — leading indicator test. Does today's social buzz predict *tomorrow's* return?
+- **Higher lags** — tests whether sentiment leads price moves by several trading days.
+
+{best_lag_note}
+
+---
+
+**Current result at lag = {r.lag_days}**
+
+| Metric | Value | What it means |
+|---|---|---|
+| **R²** | {r.r_squared:.4f} | Mention volume explains ~{r.r_squared * 100:.1f}% of return variance — {r2_word} explanatory power. |
+| **Pearson r** | {r.pearson_r:.4f} | {pearson_word.capitalize()} {"positive" if r.pearson_r >= 0 else "negative"} linear association between mention count and {r.lag_days}-day-ahead return. |
+| **p-value** | {r.p_value:.4f} | {"Significant — the slope is unlikely to be zero by chance (p < 0.05)." if r.is_significant else "Not significant — we cannot reject the null hypothesis of no relationship (p ≥ 0.05)."} |
+| **Slope** | {r.slope:.6f} | Each additional mention is associated with a {abs(r.slope):.6f}% {direction_sign} in the {r.lag_days}-day-ahead return. |
+| **Intercept** | {r.intercept:.4f} | Predicted return when mentions = 0 is {r.intercept:.4f}%. |
+| **n (obs.)** | {r.n_observations} | Paired trading-day observations used to fit the model. |
+""")
+
+    if r.is_significant:
+        st.success(
+            f"**Significant result:** At lag {r.lag_days}, {name} shows a statistically "
+            f"significant {r.direction} correlation between mention volume and stock return "
+            f"(p = {r.p_value:.4f}). R² = {r.r_squared:.4f} — social mentions explain "
+            f"~{r.r_squared * 100:.1f}% of return variance. Correlation does not imply causation."
+        )
+    else:
+        st.info(
+            f"**No significant relationship:** At lag {r.lag_days}, there is no statistically "
+            f"significant linear relationship between {name} mention volume and stock return "
+            f"(p = {r.p_value:.4f}). Social media activity alone is not a reliable predictor "
+            f"of price movements at this lag."
+        )
+
+
+def render_regression_suggestions(name: str) -> None:
+    """Render brand-specific contextual suggestions about the regression results."""
+    context = REGRESSION_CONTEXT.get(name)
+    if not context:
+        return
+    st.markdown("#### Regression Suggestions")
+    st.warning(f"**Contextual factors that may be driving these numbers for {name}:**\n\n{context}")
+
+
 # ─── Sidebar ──────────────────────────────────────────────────────────────────
 
 with st.sidebar:
@@ -347,11 +486,13 @@ for product_cfg in config.PRODUCTS:
                 f"n = {r.n_observations} trading-day observations | "
                 f"Direction: {r.direction}"
             )
+            render_regression_breakdown(name, r, lag_results)
         else:
             st.info(
                 "Not enough overlapping data points to run regression at this lag. "
                 "Try refreshing data or selecting a different lag."
             )
+        render_regression_suggestions(name)
 
 
 # ─── Summary regression table ─────────────────────────────────────────────────
@@ -368,19 +509,12 @@ summary_df = reg.summary_table(all_reg_results)
 # Filter to selected products only
 summary_df = summary_df[summary_df["Product"].isin(selected_products)]
 
-# Replace boolean with readable text
+# Use emoji indicators — no CSS required, readable in every theme
 summary_df["Significant (p<0.05)"] = summary_df["Significant (p<0.05)"].map(
-    {True: "Yes", False: "No"}
+    {True: "✅ Yes", False: "❌ No"}
 )
 
-# Colour-code rows — use colours that work in both light and dark themes
-def highlight_sig(row):
-    if row["Significant (p<0.05)"] == "Yes":
-        return ["background-color: #1a6b3a; color: #ffffff"] * len(row)
-    return [""] * len(row)
-
-styled = summary_df.style.apply(highlight_sig, axis=1)
-st.dataframe(styled, use_container_width=True, hide_index=True)
+st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
 
 # ─── Mention leaderboard ──────────────────────────────────────────────────────
