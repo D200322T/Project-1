@@ -96,6 +96,18 @@ def sig_badge(is_sig: bool) -> str:
     return "✅ Yes" if is_sig else "❌ No"
 
 
+def normalize_series(s: pd.Series, method: str) -> pd.Series:
+    if method == "None" or s.empty:
+        return s
+    if method == "Z-score":
+        std = s.std()
+        return (s - s.mean()) / std if std > 0 else s - s.mean()
+    if method == "Min-Max":
+        mn, mx = s.min(), s.max()
+        return (s - mn) / (mx - mn) if mx > mn else pd.Series(np.zeros(len(s)), index=s.index)
+    return s
+
+
 # ─── Sidebar ──────────────────────────────────────────────────────────────────
 
 with st.sidebar:
@@ -127,11 +139,34 @@ with st.sidebar:
         value=30,
         step=1,
     )
+    selected_lags = st.multiselect(
+        "Lag days to compute",
+        options=list(range(8)),
+        default=config.LAG_DAYS,
+        help="Which lag offsets (trading days) to include in regression analysis.",
+    )
+    if not selected_lags:
+        selected_lags = config.LAG_DAYS
+
     selected_lag = st.selectbox(
-        "Regression lag (days)",
-        options=config.LAG_DAYS,
-        index=1,
+        "Display lag (days)",
+        options=sorted(selected_lags),
+        index=min(1, len(selected_lags) - 1),
         help="Lag=0: same-day correlation. Lag=1: do today's mentions predict tomorrow's return?",
+    )
+
+    st.markdown("---")
+    st.subheader("Normalization")
+    normalization = st.selectbox(
+        "Mention normalization",
+        options=["None", "Z-score", "Min-Max"],
+        index=0,
+        help=(
+            "None: raw counts. "
+            "Z-score: subtract mean, divide by std. "
+            "Min-Max: scale to [0, 1]. "
+            "Applied to mention charts for fair cross-product comparison."
+        ),
     )
 
     st.markdown("---")
@@ -143,7 +178,7 @@ with st.sidebar:
 
 mention_data = load_mentions()
 stock_dfs = load_stocks()
-all_reg_results = reg.run_all_regressions(mention_data, stock_dfs, lags=config.LAG_DAYS)
+all_reg_results = reg.run_all_regressions(mention_data, stock_dfs, lags=selected_lags)
 
 # ─── Header ───────────────────────────────────────────────────────────────────
 
@@ -197,23 +232,27 @@ for product_cfg in config.PRODUCTS:
             st.subheader("Mention Count Over Time")
             if not m_series.empty:
                 cutoff = pd.Timestamp.now() - pd.Timedelta(days=history_days)
-                m_filtered = m_series[m_series["date"] >= cutoff]
+                m_filtered = m_series[m_series["date"] >= cutoff].copy()
+                m_filtered["mentions"] = normalize_series(m_filtered["mentions"], normalization)
+                y_label = f"Mentions ({normalization})" if normalization != "None" else "Mentions"
                 fig_mentions = px.bar(
                     m_filtered,
                     x="date",
                     y="mentions",
-                    labels={"date": "Date", "mentions": "Mentions"},
+                    labels={"date": "Date", "mentions": y_label},
                     color_discrete_sequence=["#c96b9b"],
                 )
                 fig_mentions.update_layout(
                     margin=dict(l=0, r=0, t=10, b=0),
                     height=280,
                     xaxis_title="",
-                    yaxis_title="Mentions",
+                    yaxis_title=y_label,
                 )
                 st.plotly_chart(fig_mentions, use_container_width=True)
+                raw_total = mentions_series(mention_data, name)
+                raw_total = raw_total[raw_total["date"] >= cutoff]
                 st.caption(
-                    f"Total mentions in window: **{int(m_filtered['mentions'].sum()):,}**"
+                    f"Total mentions in window: **{int(raw_total['mentions'].sum()):,}**"
                 )
             else:
                 st.info("No mention data available. Run a scrape first.")
@@ -384,9 +423,11 @@ for name in PRODUCT_NAMES:
     if not m.empty:
         cutoff = pd.Timestamp.now() - pd.Timedelta(days=history_days)
         m = m[m["date"] >= cutoff].copy()
+        m["mentions"] = normalize_series(m["mentions"], normalization)
         m["product"] = name
         trend_frames.append(m)
 
+trend_y_label = f"Mentions ({normalization})" if normalization != "None" else "Mentions"
 if trend_frames:
     trend_df = pd.concat(trend_frames, ignore_index=True)
     fig_trend = px.line(
@@ -394,7 +435,7 @@ if trend_frames:
         x="date",
         y="mentions",
         color="product",
-        labels={"date": "Date", "mentions": "Mentions", "product": "Product"},
+        labels={"date": "Date", "mentions": trend_y_label, "product": "Product"},
         color_discrete_sequence=px.colors.qualitative.Pastel,
     )
     fig_trend.update_layout(
