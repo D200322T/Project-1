@@ -368,10 +368,16 @@ summary_df = reg.summary_table(all_reg_results)
 # Filter to selected products only
 summary_df = summary_df[summary_df["Product"].isin(selected_products)]
 
-# Colour-code the significant column
+# Replace boolean with readable text
+summary_df["Significant (p<0.05)"] = summary_df["Significant (p<0.05)"].map(
+    {True: "Yes", False: "No"}
+)
+
+# Colour-code rows — use colours that work in both light and dark themes
 def highlight_sig(row):
-    color = "background-color: #d4edda" if row["Significant (p<0.05)"] else ""
-    return [color] * len(row)
+    if row["Significant (p<0.05)"] == "Yes":
+        return ["background-color: #1a6b3a; color: #ffffff"] * len(row)
+    return [""] * len(row)
 
 styled = summary_df.style.apply(highlight_sig, axis=1)
 st.dataframe(styled, use_container_width=True, hide_index=True)
